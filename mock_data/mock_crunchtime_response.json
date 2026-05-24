@@ -1,0 +1,24 @@
+{
+  "_comment": "This file mirrors the real Crunchtime API response structure. All dollar amounts are in USD. Replace with actual API response shape if it differs — the keys gross_sales, discounts, promos, sales_tax, and business_date are what qbxml_builder.py reads.",
+  "business_date": "2024-01-14",
+  "location_id": "PLACEHOLDER",
+  "location_name": "Mock Restaurant Location",
+  "currency": "USD",
+  "gross_sales": 4821.50,
+  "discounts": 142.75,
+  "promos": 58.00,
+  "sales_tax": 312.40,
+  "net_sales": 4620.75,
+  "tender": {
+    "cash": 1205.25,
+    "credit_card": 3198.10,
+    "gift_card": 375.00,
+    "other": 43.15
+  },
+  "transaction_count": 187,
+  "average_check": 24.71,
+  "void_count": 3,
+  "void_amount": 87.50,
+  "refund_count": 1,
+  "refund_amount": 22.00
+}

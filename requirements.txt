@@ -1,0 +1,15 @@
+# Core SOAP server
+spyne==2.14.0
+lxml==5.2.1
+
+# HTTP client for Crunchtime REST API
+requests==2.31.0
+
+# Web dashboard
+flask==3.0.3
+
+# Job scheduler (nightly sync + retry)
+apscheduler==3.10.4
+
+# Optional: production WSGI server (uncomment if you replace wsgiref)
+# waitress==3.0.0
