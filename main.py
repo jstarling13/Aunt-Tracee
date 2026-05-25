@@ -268,6 +268,27 @@ def cmd_retry(args):
     print("\nRetry pass complete. Run 'python main.py show-log' to see results.\n")
 
 
+def cmd_generate_qwc(args):
+    """Generate one .qwc file per store in config.LOCATIONS."""
+    import qwc_generator
+    print(f"\n{'='*60}")
+    print(f"  GENERATING .QWC FILES FOR {len(config.LOCATIONS)} STORES")
+    print(f"{'='*60}\n")
+    generated = qwc_generator.generate_all()
+    for name, path in generated:
+        print(f"  OK  {name}")
+        print(f"      {path}")
+    print(f"\n{'='*60}")
+    print(f"  {len(generated)} files written to: {qwc_generator.QWC_DIR}/")
+    print(f"{'='*60}")
+    print("\nNext steps:")
+    print("  1. Open QuickBooks Web Connector for each store")
+    print("  2. Click 'Add an Application'")
+    print("  3. Browse to the matching .qwc file in the qwc_files/ folder")
+    print("  4. Authorize in QuickBooks when prompted")
+    print("  5. Enter password: SRG$ync2024!\n")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -290,6 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser('setup-accounts',help='Interactive QB account name mapper')
     sub.add_parser('show-log',      help='Print recent sync history')
     sub.add_parser('retry',         help='Manually retry all failed syncs')
+    sub.add_parser('generate-qwc', help='Generate .qwc files for all 13 stores')
 
     # explore
     p_explore = sub.add_parser('explore', help='Preview sales data in terminal table')
@@ -321,6 +343,7 @@ COMMAND_MAP = {
     'backfill':       cmd_backfill,
     'show-log':       cmd_show_log,
     'retry':          cmd_retry,
+    'generate-qwc':  cmd_generate_qwc,
 }
 
 
