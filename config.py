@@ -45,7 +45,7 @@ LOCATIONS = [
         'crunchtime_id': '304498',
         'name':          'Canyon Donuts Lake Worth LLC',
         'qb_file':       'PLACEHOLDER',
-        'has_baskin':    False,
+        'has_baskin':    True,
     },
     {
         'crunchtime_id': '342863',
@@ -75,7 +75,7 @@ LOCATIONS = [
         'crunchtime_id': '355290',
         'name':          'Canyon Donuts Glen Cove Road',
         'qb_file':       'PLACEHOLDER',
-        'has_baskin':    False,
+        'has_baskin':    True,
     },
     {
         'crunchtime_id': '330050',
@@ -105,7 +105,7 @@ LOCATIONS = [
         'crunchtime_id': '341863',
         'name':          'Canyon Donuts Franklin Square',
         'qb_file':       'PLACEHOLDER',
-        'has_baskin':    True,            # Franklin Square has Baskin (confirmed from Entry #668)
+        'has_baskin':    False,
     },
     {
         'crunchtime_id': '335596',
