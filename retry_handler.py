@@ -1,20 +1,19 @@
 # =============================================================================
-# retry_handler.py — Automatic retry system + nightly job scheduler
+# retry_handler.py — Weekly job scheduler + automatic retry system
+# SRG Business Services LLC — 13-store Canyon Donuts
 # =============================================================================
-# Two responsibilities:
-#   1. retry_failed_syncs() — scans the DB for failed attempts and retries them
-#      with exponential backoff (2s, 4s, 8s between attempts)
-#   2. start_scheduler()   — starts APScheduler background jobs:
-#        • nightly sync at SYNC_HOUR:SYNC_MINUTE (default 11:00 PM)
-#        • retry pass  at RETRY_HOUR:RETRY_MINUTE (default 11:30 PM)
+# Responsibilities:
+#   1. run_weekly_sync()   — fires every Sunday night, syncs all 13 stores
+#   2. retry_failed_syncs() — fires 30 min later, retries any that failed
+#   3. start_scheduler()   — wires both jobs into APScheduler
 #
-# Called automatically when the SOAP server starts, or manually via:
-#   python main.py retry
+# The weekly sync just pre-validates and queues data. The actual QB posting
+# happens when QBWC polls the SOAP server and calls sendRequestXML.
 # =============================================================================
 
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,162 +22,166 @@ import config
 import sync_tracker
 import crunchtime_client
 import qbxml_builder
-import validator
 import alerts
 
 logger = logging.getLogger(__name__)
 
-# Backoff delays in seconds between retry attempts (attempt 1, 2, 3)
 BACKOFF_SECONDS = [2, 4, 8]
 
 
-def run_sync_for_date(target_date: date) -> bool:
+def run_weekly_sync():
     """
-    Full sync pipeline for a single date.
-    Returns True on success, False on failure.
-    This is the canonical sync function used by QBWC, retry, backfill, and scheduler.
+    Sunday night scheduler job — pre-fetches and validates sales data
+    for all 13 stores for the week that just ended (Sun-Sat).
+    QBWC picks up the data on its next poll and posts to QuickBooks.
     """
-    logger.info("Running sync for %s", target_date)
+    week_start, week_end = qbxml_builder.get_week_range()
+    logger.info("Weekly sync triggered: week %s to %s, %d stores",
+                week_start, week_end, len(config.LOCATIONS))
 
-    # Fetch data
-    try:
-        sales_data = crunchtime_client.get_sales_data(target_date)
-    except Exception as exc:
-        msg = f"Crunchtime API error: {exc}"
-        logger.error(msg)
-        sync_tracker.record_attempt(target_date, 'failed', error_message=msg)
-        alerts.alert_sync_failed(target_date, msg)
-        return False
+    for location in config.LOCATIONS:
+        loc_id = location['crunchtime_id']
+        name   = location['name']
 
-    # Validate
-    result = validator.validate(sales_data)
-    if not result.is_valid:
-        msg = "Validation failed:\n" + result.summary()
-        logger.error(msg)
-        sync_tracker.record_attempt(target_date, 'failed', error_message=msg)
-        alerts.alert_bad_data(target_date, result.errors)
-        return False
+        if sync_tracker.already_synced(loc_id, week_start):
+            logger.info("Weekly sync: %s week %s already done — skipping", name, week_start)
+            continue
 
-    # Build qbXML
-    try:
-        xml = qbxml_builder.build_journal_entry_xml(sales_data)
-    except Exception as exc:
-        msg = f"qbXML build error: {exc}"
-        logger.error(msg)
-        sync_tracker.record_attempt(target_date, 'failed', error_message=msg)
-        alerts.alert_sync_failed(target_date, msg)
-        return False
+        try:
+            sales_data = crunchtime_client.get_weekly_sales(location, week_start, week_end)
+            xml        = qbxml_builder.build_weekly_journal_entry_xml(sales_data, location)
 
-    # Record as pending — QBWC will update to success/failed via receiveResponseXML
-    sync_tracker.record_attempt(target_date, 'pending', qbxml_sent=xml)
-    logger.info("Sync queued for %s — QBWC will post and confirm", target_date)
-    return True
+            sync_tracker.record_attempt(
+                location_id   = loc_id,
+                store_name    = name,
+                week_start    = week_start,
+                week_end      = week_end,
+                status        = 'pending',
+                qbxml_sent    = xml,
+            )
+            logger.info("Weekly sync: queued %s week %s for QBWC", name, week_start)
+
+        except Exception as exc:
+            msg = f"Error fetching/building for {name}: {exc}"
+            logger.error(msg, exc_info=True)
+            sync_tracker.record_attempt(
+                location_id   = loc_id,
+                store_name    = name,
+                week_start    = week_start,
+                week_end      = week_end,
+                status        = 'failed',
+                error_message = msg,
+            )
+            alerts.alert_sync_failed(week_start, msg)
 
 
 def retry_failed_syncs():
     """
-    Find all 'failed' sync records and retry them up to MAX_RETRY_ATTEMPTS times.
-    Uses exponential backoff between attempts.
-    Sends a recovery email if a previously-failed date now succeeds.
+    Retry all failed sync attempts that haven't hit the retry limit.
+    Fires 30 minutes after the main weekly sync.
     """
     logger.info("Retry handler: scanning for failed syncs...")
+    failed = sync_tracker.get_failed_syncs()
 
-    with sync_tracker._get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT business_date FROM sync_log
-             WHERE status = 'failed'
-               AND location_id = ?
-               AND business_date NOT IN (
-                   SELECT business_date FROM sync_log
-                    WHERE status = 'success' AND location_id = ?
-               )
-            ORDER BY business_date
-            """,
-            (config.CRUNCHTIME_LOCATION_ID, config.CRUNCHTIME_LOCATION_ID)
-        ).fetchall()
-
-    failed_dates = [date.fromisoformat(r['business_date']) for r in rows]
-
-    if not failed_dates:
-        logger.info("Retry handler: no failed syncs to retry.")
+    if not failed:
+        logger.info("Retry handler: nothing to retry.")
         return
 
-    logger.info("Retry handler: found %d date(s) to retry: %s", len(failed_dates), failed_dates)
+    logger.info("Retry handler: found %d failed attempt(s)", len(failed))
 
-    for target_date in failed_dates:
-        success = False
-        for attempt_num in range(1, config.MAX_RETRY_ATTEMPTS + 1):
-            logger.info(
-                "Retry attempt %d/%d for %s", attempt_num, config.MAX_RETRY_ATTEMPTS, target_date
-            )
+    for row in failed:
+        loc_id     = row['location_id']
+        store_name = row['store_name']
+        week_start = date.fromisoformat(row['week_start'])
+        week_end   = date.fromisoformat(row['week_end'])
+        location   = _find_location(loc_id)
+
+        if not location:
+            logger.error("Cannot retry %s — location not found in config", store_name)
+            continue
+
+        # Already succeeded in a later attempt
+        if sync_tracker.already_synced(loc_id, week_start):
+            logger.info("Retry: %s week %s now shows success — skipping", store_name, week_start)
+            continue
+
+        sync_tracker.increment_retry(row['id'])
+
+        for attempt in range(1, config.MAX_RETRY_ATTEMPTS + 1):
+            logger.info("Retry %d/%d for %s week %s",
+                        attempt, config.MAX_RETRY_ATTEMPTS, store_name, week_start)
             try:
-                success = run_sync_for_date(target_date)
-                if success:
-                    logger.info("Retry succeeded for %s on attempt %d", target_date, attempt_num)
-                    alerts.alert_sync_recovered(target_date)
-                    break
+                sales_data = crunchtime_client.get_weekly_sales(location, week_start, week_end)
+                xml        = qbxml_builder.build_weekly_journal_entry_xml(sales_data, location)
+
+                sync_tracker.record_attempt(
+                    location_id   = loc_id,
+                    store_name    = store_name,
+                    week_start    = week_start,
+                    week_end      = week_end,
+                    status        = 'pending',
+                    qbxml_sent    = xml,
+                )
+                logger.info("Retry queued for QBWC: %s week %s", store_name, week_start)
+                break
+
             except Exception as exc:
-                logger.error("Retry attempt %d failed: %s", attempt_num, exc)
-
-            if attempt_num < config.MAX_RETRY_ATTEMPTS:
-                delay = BACKOFF_SECONDS[min(attempt_num - 1, len(BACKOFF_SECONDS) - 1)]
-                logger.info("Waiting %ds before next retry...", delay)
-                time.sleep(delay)
-
-        if not success:
-            logger.error(
-                "All %d retry attempts exhausted for %s", config.MAX_RETRY_ATTEMPTS, target_date
-            )
-            alerts.alert_sync_failed(
-                target_date,
-                f"Exhausted all {config.MAX_RETRY_ATTEMPTS} retry attempts. Manual intervention required."
-            )
-
-
-def run_nightly_sync():
-    """Scheduled job: sync yesterday's sales data."""
-    logger.info("Nightly sync job triggered by scheduler")
-    target_date = date.today() - timedelta(days=config.DEFAULT_LOOKBACK_DAYS)
-
-    if sync_tracker.already_synced(target_date):
-        logger.info("Nightly sync: %s already synced, skipping", target_date)
-        return
-
-    run_sync_for_date(target_date)
+                logger.error("Retry attempt %d failed for %s: %s", attempt, store_name, exc)
+                delay = BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)]
+                if attempt < config.MAX_RETRY_ATTEMPTS:
+                    time.sleep(delay)
+                else:
+                    alerts.alert_sync_failed(
+                        week_start,
+                        f"{store_name}: exhausted all {config.MAX_RETRY_ATTEMPTS} retries. "
+                        "Manual intervention required."
+                    )
 
 
 def start_scheduler() -> BackgroundScheduler:
     """
-    Start APScheduler background jobs.
-    Call this from soap_server.py or main.py serve so the scheduler
-    runs alongside the SOAP server in the same process.
-    Returns the scheduler instance so the caller can shut it down cleanly.
+    Start APScheduler with two weekly Sunday night jobs.
+    Returns the scheduler so the caller can shut it down cleanly.
     """
     scheduler = BackgroundScheduler()
 
+    # Main sync: Sunday at SYNC_HOUR:SYNC_MINUTE (default 11:00 PM)
     scheduler.add_job(
-        run_nightly_sync,
-        CronTrigger(hour=config.SYNC_HOUR, minute=config.SYNC_MINUTE),
-        id='nightly_sync',
-        name='Nightly Crunchtime sync',
+        run_weekly_sync,
+        CronTrigger(
+            day_of_week = config.SYNC_DAY_OF_WEEK,
+            hour        = config.SYNC_HOUR,
+            minute      = config.SYNC_MINUTE,
+        ),
+        id='weekly_sync',
+        name='Weekly Crunchtime sync — all 13 stores',
         replace_existing=True,
     )
-    logger.info(
-        "Scheduled nightly sync at %02d:%02d", config.SYNC_HOUR, config.SYNC_MINUTE
-    )
+    logger.info("Scheduled weekly sync: %s at %02d:%02d",
+                config.SYNC_DAY_OF_WEEK.upper(), config.SYNC_HOUR, config.SYNC_MINUTE)
 
+    # Retry pass: 30 minutes later
     scheduler.add_job(
         retry_failed_syncs,
-        CronTrigger(hour=config.RETRY_HOUR, minute=config.RETRY_MINUTE),
+        CronTrigger(
+            day_of_week = config.SYNC_DAY_OF_WEEK,
+            hour        = config.RETRY_HOUR,
+            minute      = config.RETRY_MINUTE,
+        ),
         id='retry_pass',
         name='Retry failed syncs',
         replace_existing=True,
     )
-    logger.info(
-        "Scheduled retry pass at %02d:%02d", config.RETRY_HOUR, config.RETRY_MINUTE
-    )
+    logger.info("Scheduled retry pass: %s at %02d:%02d",
+                config.SYNC_DAY_OF_WEEK.upper(), config.RETRY_HOUR, config.RETRY_MINUTE)
 
     scheduler.start()
     logger.info("APScheduler started")
     return scheduler
+
+
+def _find_location(location_id: str) -> dict | None:
+    for loc in config.LOCATIONS:
+        if loc['crunchtime_id'] == location_id:
+            return loc
+    return None
