@@ -139,8 +139,25 @@ def _fetch_live_weekly(location: dict, week_start: date, week_end: date) -> dict
     raw = response.json()
 
     # ---------------------------------------------------------------------------
-    # FIELD MAPPING — update these keys to match the actual Crunchtime API response
-    # ON-SITE: Print raw response first with: logger.debug("Raw: %s", raw)
+    # FIELD MAPPING — based on Tracee's Sigma Computing / Dunkin Sales Summary report
+    # Report: app.sigmacomputing.com → Dunkin Sales Summary w/ Charged Tips
+    #
+    # Sales Mix Detail fields:
+    #   DD Net Sales              → dkn_sales   (QB 4050)
+    #   BR Net Sales              → baskin_sales (QB 4051)
+    #   +Sales Tax                → sales_tax    (QB 210) — dollar amount, not rate
+    #   GC Total Transactions     → gift_cards   (QB 1204)
+    #   Fee Exempt - Charged Tips → employee_tips (QB 25100)
+    #
+    # Tender Type fields:
+    #   Cash Due                  → cash
+    #   Credit Card - Amex        → amex
+    #   Credit Card - Mastercard  → mc (combined with Visa below)
+    #   Credit Card - Visa        → visa (combined with MC above)
+    #   Credit Card - Discover    → discover
+    #   Grub Hub Tender           → grubhub
+    #   Delivery: Uber Eats       → uber_eats
+    #   Delivery: Doordash        → door_dash
     # ---------------------------------------------------------------------------
     return {
         'week_start':    week_start.isoformat(),
@@ -148,20 +165,24 @@ def _fetch_live_weekly(location: dict, week_start: date, week_end: date) -> dict
         'location_id':   location_id,
         'store_name':    location['name'],
 
-        # Update key names below to match actual Crunchtime response fields
-        'dkn_sales':     float(raw.get('dkn_net_sales', raw.get('gross_sales', 0))),
-        'baskin_sales':  float(raw.get('baskin_net_sales', 0)),
-        'sales_tax':     float(raw.get('sales_tax', raw.get('tax_collected', 0))),
-        'gift_cards':    float(raw.get('gift_card_redemptions', raw.get('gift_cards', 0))),
-        'employee_tips': float(raw.get('employee_tips', raw.get('tips', 0))),
+        # Sales by brand → QB credit lines
+        'dkn_sales':     float(raw.get('DD Net Sales', raw.get('dd_net_sales', 0))),
+        'baskin_sales':  float(raw.get('BR Net Sales', raw.get('br_net_sales', 0))),
 
-        'cash':          float(raw.get('cash', 0)),
-        'amex':          float(raw.get('amex', raw.get('american_express', 0))),
-        'mc_visa':       float(raw.get('mc_visa', raw.get('mastercard_visa', 0))),
-        'discover':      float(raw.get('discover', 0)),
-        'grubhub':       float(raw.get('grubhub', 0)),
-        'uber_eats':     float(raw.get('uber_eats', 0)),
-        'door_dash':     float(raw.get('door_dash', raw.get('doordash', 0))),
+        # Other QB credit lines
+        'sales_tax':     float(raw.get('+Sales Tax', raw.get('sales_tax', 0))),
+        'gift_cards':    float(raw.get('GC Total Transactions', raw.get('gift_cards', 0))),
+        'employee_tips': float(raw.get('Fee Exempt - Charged Tips', raw.get('employee_tips', 0))),
+
+        # Payment method breakdown → QB Exchange sub-accounts
+        'cash':          float(raw.get('Cash Due', raw.get('cash', 0))),
+        'amex':          float(raw.get('Credit Card - Amex', raw.get('amex', 0))),
+        'mc_visa':       float(raw.get('Credit Card - Mastercard', 0)) +
+                         float(raw.get('Credit Card - Visa', 0)),
+        'discover':      float(raw.get('Credit Card - Discover', raw.get('discover', 0))),
+        'grubhub':       float(raw.get('Grub Hub Tender', raw.get('grubhub', 0))),
+        'uber_eats':     float(raw.get('Delivery: Uber Eats', raw.get('uber_eats', 0))),
+        'door_dash':     float(raw.get('Delivery: Doordash', raw.get('door_dash', 0))),
     }
 
 
