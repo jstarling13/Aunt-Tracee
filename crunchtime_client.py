@@ -1,16 +1,18 @@
 # =============================================================================
-# crunchtime_client.py — Fetches daily sales data from Crunchtime
+# crunchtime_client.py — Fetches weekly sales data from Crunchtime
+# SRG Business Services LLC — 13-store Dunkin/Baskin setup
 # =============================================================================
 # Two modes controlled by config.USE_MOCK_DATA:
-#   True  → reads mock_data/mock_crunchtime_response.json  (no internet needed)
+#   True  → returns realistic mock data (safe for testing, no credentials needed)
 #   False → calls the real Crunchtime REST API
-# ON-SITE: after filling config.py, set USE_MOCK_DATA = False and test.
+#
+# ON-SITE: Fill config.py credentials, set USE_MOCK_DATA = False, then run:
+#   python main.py test-mock   to verify the full pipeline first
 # =============================================================================
 
 import json
-import os
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 import requests
 
@@ -19,92 +21,108 @@ import config
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# SalesData — normalized view of a Crunchtime daily sales response
-# ---------------------------------------------------------------------------
-
-class SalesData:
-    """Wraps the raw Crunchtime API/mock dict with typed attributes."""
-
-    def __init__(self, raw: dict):
-        summary = raw.get('sales_summary', {})
-        tender  = raw.get('tender_breakdown', {})
-        self.location_id     = raw.get('location_id', config.CRUNCHTIME_LOCATION_ID)
-        self.business_date   = raw.get('business_date', date.today().isoformat())
-        self.gross_sales     = float(summary.get('gross_sales', 0))
-        self.discounts       = float(summary.get('discounts', 0))
-        self.promos          = float(summary.get('promos', 0))
-        self.net_sales       = float(summary.get('net_sales', 0))
-        self.sales_tax       = float(summary.get('sales_tax', 0))
-        self.total_collected = float(summary.get('total_collected', 0))
-        self.cash            = float(tender.get('cash', {}).get('amount', 0))
-        self.credit_card     = float(tender.get('credit_card', {}).get('amount', 0))
-        self.gift_card       = float(tender.get('gift_card', {}).get('amount', 0))
-
-    def __repr__(self):
-        return (
-            f"<SalesData date={self.business_date} "
-            f"gross=${self.gross_sales:.2f} tax=${self.sales_tax:.2f}>"
-        )
-
-
-def get_sales_data(sales_date: date) -> dict:
+def get_weekly_sales(location: dict, week_start: date, week_end: date) -> dict:
     """
-    Return Crunchtime sales data for the given date.
-    Delegates to mock or live depending on config.USE_MOCK_DATA.
+    Return one week of sales data for a single store.
+
+    Args:
+        location:   dict from config.LOCATIONS (has crunchtime_id, name, has_baskin)
+        week_start: first day of the week (Sunday)
+        week_end:   last day of the week (Saturday)
+
+    Returns dict with keys:
+        week_start      — 'YYYY-MM-DD'
+        week_end        — 'YYYY-MM-DD'
+        location_id     — Crunchtime location ID
+        store_name      — human-readable store name
+        dkn_sales       — Dunkin gross sales for the week
+        baskin_sales    — Baskin gross sales (0.0 if no Baskin)
+        sales_tax       — sales tax collected
+        gift_cards      — gift card redemptions
+        employee_tips   — tips payable to staff
+        cash            — cash tendered
+        amex            — American Express tendered
+        mc_visa         — Mastercard/Visa tendered (combined)
+        discover        — Discover tendered
+        grubhub         — Grubhub orders
+        uber_eats       — Uber Eats orders
+        door_dash       — DoorDash orders
     """
     if config.USE_MOCK_DATA:
-        logger.info("USE_MOCK_DATA=True — loading mock sales data")
-        return _load_mock_data(sales_date)
+        logger.info("USE_MOCK_DATA=True — returning mock weekly sales for %s", location['name'])
+        return _mock_weekly_data(location, week_start, week_end)
     else:
-        logger.info("USE_MOCK_DATA=False — calling Crunchtime API")
-        return _fetch_live_data(sales_date)
+        logger.info("Fetching live Crunchtime data for %s week %s-%s",
+                    location['name'], week_start, week_end)
+        return _fetch_live_weekly(location, week_start, week_end)
 
 
 # ---------------------------------------------------------------------------
-# MOCK PATH
+# MOCK DATA — realistic numbers based on Tracee's actual entry (Entry #668)
+# Donuts Franklin Square: $35,773 DKN + $2,579 tax + $503 gift cards + $197 tips
 # ---------------------------------------------------------------------------
 
-def _load_mock_data(sales_date: date) -> dict:
-    """Load mock JSON and patch in the requested date so callers get a
-    consistent structure regardless of the date they asked for."""
-    mock_path = os.path.join(
-        os.path.dirname(__file__), 'mock_data', 'mock_crunchtime_response.json'
-    )
-    with open(mock_path, 'r') as f:
-        data = json.load(f)
-
-    # Overwrite the date in the mock so the qbXML TxnDate is always correct
-    data['business_date'] = sales_date.isoformat()
-    return data
-
-
-# ---------------------------------------------------------------------------
-# LIVE PATH
-# ---------------------------------------------------------------------------
-
-def _fetch_live_data(sales_date: date) -> dict:
+def _mock_weekly_data(location: dict, week_start: date, week_end: date) -> dict:
     """
-    Call the real Crunchtime API.
+    Return mock data that mirrors the structure of Tracee's real QB entries.
+    Numbers are based on Entry #668 from Donuts Franklin Square.
+    """
+    has_baskin = location.get('has_baskin', False)
 
-    ON-SITE: Confirm the exact endpoint path with Crunchtime support or docs.
-    The URL pattern below is a common convention — adjust if needed.
+    return {
+        'week_start':    week_start.isoformat(),
+        'week_end':      week_end.isoformat(),
+        'location_id':   location['crunchtime_id'],
+        'store_name':    location['name'],
 
-    Expected endpoint: GET {BASE_URL}/locations/{LOCATION_ID}/sales?date=YYYY-MM-DD
-    Authentication:    Bearer token in Authorization header
+        # Sales by brand (matches QB accounts 4050 / 4051)
+        'dkn_sales':     35773.00,
+        'baskin_sales':   1250.00 if has_baskin else 0.00,
+
+        # Liabilities / other credits
+        'sales_tax':      2579.00,
+        'gift_cards':      503.00,
+        'employee_tips':   197.19,
+
+        # Payment method breakdown (for deposit entries, maps to 120x accounts)
+        'cash':           8200.00,
+        'amex':           9100.00,
+        'mc_visa':       14500.00,
+        'discover':        1200.00,
+        'grubhub':         1500.00,
+        'uber_eats':       2100.00,
+        'door_dash':       1350.00,
+    }
+
+
+# ---------------------------------------------------------------------------
+# LIVE PATH — real Crunchtime API calls
+# ---------------------------------------------------------------------------
+
+def _fetch_live_weekly(location: dict, week_start: date, week_end: date) -> dict:
+    """
+    Call Crunchtime API to get weekly sales totals for one location.
+
+    ON-SITE: Confirm the exact endpoint and field names with Crunchtime support.
+    The field mapping below (raw_to_normalized) must match the actual API response.
+    Ask Crunchtime: "What fields represent DKN net sales, Baskin net sales,
+    sales tax collected, gift card redemptions, and employee tips for a date range?"
     """
     _validate_credentials()
 
+    location_id = location['crunchtime_id']
     url = (
         f"{config.CRUNCHTIME_API_BASE_URL}"
-        f"/locations/{config.CRUNCHTIME_LOCATION_ID}"
-        f"/sales"
+        f"/locations/{location_id}/sales"
     )
     headers = {
         'Authorization': f'Bearer {config.CRUNCHTIME_API_KEY}',
         'Accept': 'application/json',
     }
-    params = {'date': sales_date.isoformat()}
+    params = {
+        'start_date': week_start.isoformat(),
+        'end_date':   week_end.isoformat(),
+    }
 
     logger.debug("GET %s params=%s", url, params)
 
@@ -112,50 +130,49 @@ def _fetch_live_data(sales_date: date) -> dict:
         response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
     except requests.exceptions.HTTPError as exc:
-        logger.error("Crunchtime API HTTP error: %s — %s", exc, response.text)
+        logger.error("Crunchtime API HTTP error for %s: %s", location['name'], exc)
         raise
     except requests.exceptions.RequestException as exc:
-        logger.error("Crunchtime API connection error: %s", exc)
+        logger.error("Crunchtime API connection error for %s: %s", location['name'], exc)
         raise
 
-    data = response.json()
-    logger.info(
-        "Crunchtime returned sales data for %s: gross_sales=%s",
-        sales_date,
-        data.get('gross_sales', 'N/A'),
-    )
-    return data
+    raw = response.json()
+
+    # ---------------------------------------------------------------------------
+    # FIELD MAPPING — update these keys to match the actual Crunchtime API response
+    # ON-SITE: Print raw response first with: logger.debug("Raw: %s", raw)
+    # ---------------------------------------------------------------------------
+    return {
+        'week_start':    week_start.isoformat(),
+        'week_end':      week_end.isoformat(),
+        'location_id':   location_id,
+        'store_name':    location['name'],
+
+        # Update key names below to match actual Crunchtime response fields
+        'dkn_sales':     float(raw.get('dkn_net_sales', raw.get('gross_sales', 0))),
+        'baskin_sales':  float(raw.get('baskin_net_sales', 0)),
+        'sales_tax':     float(raw.get('sales_tax', raw.get('tax_collected', 0))),
+        'gift_cards':    float(raw.get('gift_card_redemptions', raw.get('gift_cards', 0))),
+        'employee_tips': float(raw.get('employee_tips', raw.get('tips', 0))),
+
+        'cash':          float(raw.get('cash', 0)),
+        'amex':          float(raw.get('amex', raw.get('american_express', 0))),
+        'mc_visa':       float(raw.get('mc_visa', raw.get('mastercard_visa', 0))),
+        'discover':      float(raw.get('discover', 0)),
+        'grubhub':       float(raw.get('grubhub', 0)),
+        'uber_eats':     float(raw.get('uber_eats', 0)),
+        'door_dash':     float(raw.get('door_dash', raw.get('doordash', 0))),
+    }
 
 
 def _validate_credentials():
-    """Raise early with a clear message if credentials are still placeholders."""
     errors = []
     if config.CRUNCHTIME_API_BASE_URL == 'PLACEHOLDER':
         errors.append('CRUNCHTIME_API_BASE_URL')
     if config.CRUNCHTIME_API_KEY == 'PLACEHOLDER':
         errors.append('CRUNCHTIME_API_KEY')
-    if config.CRUNCHTIME_LOCATION_ID == 'PLACEHOLDER':
-        errors.append('CRUNCHTIME_LOCATION_ID')
     if errors:
         raise ValueError(
-            f"config.py still has PLACEHOLDER values for: {', '.join(errors)}. "
+            f"config.py still has PLACEHOLDER for: {', '.join(errors)}. "
             "Fill these in before setting USE_MOCK_DATA = False."
         )
-
-
-# ---------------------------------------------------------------------------
-# Convenience wrapper — accepts an ISO date string, returns a SalesData object.
-# Used by soap_server.py and main.py.
-# ---------------------------------------------------------------------------
-
-def get_daily_sales(business_date: str = None) -> SalesData:
-    """
-    Fetch sales for the given ISO date string (e.g. '2024-01-15').
-    Defaults to today if omitted. Returns a typed SalesData object.
-    """
-    if business_date is None:
-        target = date.today()
-    else:
-        target = date.fromisoformat(business_date)
-    raw = get_sales_data(target)
-    return SalesData(raw)

@@ -1,105 +1,136 @@
 # =============================================================================
-# qbxml_builder.py — Converts Crunchtime sales data into a qbXML JournalEntry
+# qbxml_builder.py — Builds the weekly qbXML journal entry for each store
 # =============================================================================
-# The output is sent verbatim to QuickBooks Desktop via the Web Connector.
-# Conforms to qbXML version 13.0 (compatible with QB Desktop 2013 and later).
+# Matches Tracee's real QuickBooks entry structure:
 #
-# Journal entry structure for each sales day:
-#   DR  Undeposited Funds       (total cash collected)
-#   CR  Gross Sales             (revenue before discounts)
-#   DR  Discounts               (contra-revenue)
-#   CR  Sales Tax Payable       (tax liability)
+#   DR  120 · Exchange                    (total cash collected for the week)
+#   CR  4050 · Sales - Dunkin             (DKN gross sales)
+#   CR  4051 · Sales - Baskin             (Baskin sales, if location has it)
+#   CR  210  · Sales Tax Payable          (tax collected)
+#   CR  1204 · Gift Card Exchange         (gift card redemptions)
+#   CR  25100 · Employee Tips Payable     (tips owed to staff)
+#
+# The entry covers one Sunday-to-Saturday week.
+# Entry is created on Sunday night by QBWC calling this server.
 # =============================================================================
 
 from decimal import Decimal, ROUND_HALF_UP
+from datetime import date, timedelta
 import logging
 
 import config
 
 logger = logging.getLogger(__name__)
 
-# All account name config keys — used by the validator below
-ACCOUNT_CONFIG_KEYS = [
-    'QB_ACCOUNT_GROSS_SALES',
-    'QB_ACCOUNT_DISCOUNTS',
-    'QB_ACCOUNT_SALES_TAX',
-    'QB_ACCOUNT_UNDEPOSITED_FUNDS',
-]
 
-
-def build_journal_entry_xml(sales_data: dict) -> str:
+def get_week_range(sync_date: date = None):
     """
-    Transform a Crunchtime sales dict into a complete qbXML request string.
+    Returns (week_start, week_end) for the Sunday-Saturday week
+    that most recently ended before sync_date.
+
+    If sync_date is Sunday, that Sunday is the last day of the week that ended.
+    Week:  Sunday = day 6 in Python's weekday() where Monday = 0
+    """
+    if sync_date is None:
+        sync_date = date.today()
+
+    # Python weekday(): Mon=0, Tue=1, ..., Sun=6
+    days_since_sunday = (sync_date.weekday() + 1) % 7
+    week_end   = sync_date - timedelta(days=days_since_sunday)      # previous Saturday
+    week_start = week_end - timedelta(days=6)                       # the Sunday before that
+    return week_start, week_end
+
+
+def build_weekly_journal_entry_xml(sales_data: dict, location: dict) -> str:
+    """
+    Build a complete qbXML JournalEntryAdd request for one store's weekly sales.
 
     Args:
-        sales_data: dict returned by crunchtime_client.get_sales_data()
+        sales_data: dict returned by crunchtime_client.get_weekly_sales(location, week_start, week_end)
+                    Expected keys:
+                        week_start      — 'YYYY-MM-DD'
+                        week_end        — 'YYYY-MM-DD'
+                        dkn_sales       — Dunkin gross sales for the week
+                        baskin_sales    — Baskin gross sales (0 if no Baskin)
+                        sales_tax       — sales tax collected
+                        gift_cards      — gift card redemptions
+                        employee_tips   — tips payable to staff
+        location:   dict from config.LOCATIONS for this store
 
     Returns:
-        str: valid qbXML ready to send to QuickBooks via QBWC
+        str: qbXML ready to send to QuickBooks via QBWC
     """
     _validate_config()
 
-    business_date = sales_data['business_date']          # 'YYYY-MM-DD'
-    location_id   = config.CRUNCHTIME_LOCATION_ID
-    # RefNumber: QB Desktop limit is 11 chars. Use compact date format.
-    compact_date  = business_date.replace('-', '')       # '20240115'
-    ref_number    = f"CT{compact_date}"                  # e.g. 'CT20240115' (10 chars)
+    week_start  = sales_data['week_start']   # 'YYYY-MM-DD'
+    week_end    = sales_data['week_end']     # 'YYYY-MM-DD'
+    store_name  = location['name']
+    has_baskin  = location.get('has_baskin', False)
 
-    gross_sales = _to_decimal(sales_data.get('gross_sales', 0))
-    discounts   = _to_decimal(sales_data.get('discounts', 0))
-    promos      = _to_decimal(sales_data.get('promos', 0))
-    sales_tax   = _to_decimal(sales_data.get('sales_tax', 0))
+    dkn_sales     = _dec(sales_data.get('dkn_sales', 0))
+    baskin_sales  = _dec(sales_data.get('baskin_sales', 0)) if has_baskin else _dec(0)
+    sales_tax     = _dec(sales_data.get('sales_tax', 0))
+    gift_cards    = _dec(sales_data.get('gift_cards', 0))
+    employee_tips = _dec(sales_data.get('employee_tips', 0))
 
-    # Total discounts/comps reduces net revenue but we post them as separate debit lines
-    total_discounts = discounts + promos
+    # Total credits must equal the Exchange debit (entry must balance)
+    total_credits = dkn_sales + baskin_sales + sales_tax + gift_cards + employee_tips
 
-    # Undeposited Funds = what customer actually paid (gross - discounts + tax collected)
-    # DR Undeposited + DR Discounts = CR Gross Sales + CR Sales Tax  (must balance)
-    undeposited = gross_sales - total_discounts + sales_tax
+    # RefNumber: compact week identifier, max 11 chars
+    # Format: WYYMMDD (7 chars) — 'W' + year + month + day of week_start
+    compact = week_start.replace('-', '')[2:]   # e.g. '260518'
+    ref_number = f"W{compact}"                  # e.g. 'W260518' (7 chars)
 
     logger.info(
-        "Building qbXML | date=%s ref=%s gross=%.2f disc=%.2f tax=%.2f undep=%.2f",
-        business_date, ref_number, gross_sales, total_discounts, sales_tax, undeposited
+        "Building weekly qbXML | store=%s week=%s to %s | "
+        "dkn=%.2f baskin=%.2f tax=%.2f gifts=%.2f tips=%.2f total=%.2f",
+        store_name, week_start, week_end,
+        dkn_sales, baskin_sales, sales_tax, gift_cards, employee_tips, total_credits
     )
 
-    # IMPORTANT: No XML comments — QB's qbXML parser rejects them.
-    # No em dashes or special Unicode — use plain ASCII in all text fields.
+    # Build credit lines — one per revenue/liability category
+    baskin_line = ''
+    if has_baskin and baskin_sales > 0:
+        baskin_line = f'''
+        <JournalCreditLine>
+          <AccountRef><FullName>{config.QB_ACCOUNT_BASKIN_SALES}</FullName></AccountRef>
+          <Amount>{_fmt(baskin_sales)}</Amount>
+          <Memo>Baskin sales {week_start} to {week_end}</Memo>
+        </JournalCreditLine>'''
+
     xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <?qbxml version="13.0"?>
 <QBXML>
   <QBXMLMsgsRq onError="stopOnError">
     <JournalEntryAddRq requestID="1">
       <JournalEntryAdd>
-        <TxnDate>{business_date}</TxnDate>
+        <TxnDate>{week_end}</TxnDate>
         <RefNumber>{ref_number}</RefNumber>
-        <Memo>Crunchtime sales import {business_date} loc {location_id}</Memo>
+        <Memo>Crunchtime weekly sales {week_start} to {week_end} {store_name}</Memo>
         <JournalDebitLine>
-          <AccountRef>
-            <FullName>{config.QB_ACCOUNT_UNDEPOSITED_FUNDS}</FullName>
-          </AccountRef>
-          <Amount>{_fmt(undeposited)}</Amount>
-          <Memo>Undeposited funds {business_date}</Memo>
+          <AccountRef><FullName>{config.QB_ACCOUNT_EXCHANGE}</FullName></AccountRef>
+          <Amount>{_fmt(total_credits)}</Amount>
+          <Memo>Weekly cash and card receipts {week_start} to {week_end}</Memo>
         </JournalDebitLine>
         <JournalCreditLine>
-          <AccountRef>
-            <FullName>{config.QB_ACCOUNT_GROSS_SALES}</FullName>
-          </AccountRef>
-          <Amount>{_fmt(gross_sales)}</Amount>
-          <Memo>Gross sales {business_date}</Memo>
-        </JournalCreditLine>
-        <JournalDebitLine>
-          <AccountRef>
-            <FullName>{config.QB_ACCOUNT_DISCOUNTS}</FullName>
-          </AccountRef>
-          <Amount>{_fmt(total_discounts)}</Amount>
-          <Memo>Discounts and promos {business_date}</Memo>
-        </JournalDebitLine>
+          <AccountRef><FullName>{config.QB_ACCOUNT_DKN_SALES}</FullName></AccountRef>
+          <Amount>{_fmt(dkn_sales)}</Amount>
+          <Memo>Dunkin sales {week_start} to {week_end}</Memo>
+        </JournalCreditLine>{baskin_line}
         <JournalCreditLine>
-          <AccountRef>
-            <FullName>{config.QB_ACCOUNT_SALES_TAX}</FullName>
-          </AccountRef>
+          <AccountRef><FullName>{config.QB_ACCOUNT_SALES_TAX}</FullName></AccountRef>
           <Amount>{_fmt(sales_tax)}</Amount>
-          <Memo>Sales tax payable {business_date}</Memo>
+          <Memo>Sales tax payable {week_start} to {week_end}</Memo>
+        </JournalCreditLine>
+        <JournalCreditLine>
+          <AccountRef><FullName>{config.QB_ACCOUNT_GIFT_CARDS}</FullName></AccountRef>
+          <Amount>{_fmt(gift_cards)}</Amount>
+          <Memo>Gift card redemptions {week_start} to {week_end}</Memo>
+        </JournalCreditLine>
+        <JournalCreditLine>
+          <AccountRef><FullName>{config.QB_ACCOUNT_EMPLOYEE_TIPS}</FullName></AccountRef>
+          <Amount>{_fmt(employee_tips)}</Amount>
+          <Memo>Employee tips payable {week_start} to {week_end}</Memo>
         </JournalCreditLine>
       </JournalEntryAdd>
     </JournalEntryAddRq>
@@ -113,30 +144,25 @@ def build_journal_entry_xml(sales_data: dict) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _to_decimal(value) -> Decimal:
-    """Convert any numeric value to a Decimal rounded to 2 places."""
+def _dec(value) -> Decimal:
     return Decimal(str(value)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
 def _fmt(value: Decimal) -> str:
-    """Format Decimal as a string with exactly 2 decimal places for qbXML."""
     return f"{value:.2f}"
 
 
 def _validate_config():
-    """
-    Raise ValueError if any account name still contains 'PLACEHOLDER'.
-    This prevents sending malformed XML to QuickBooks Desktop.
-    """
-    bad = []
-    for key in ACCOUNT_CONFIG_KEYS:
-        value = getattr(config, key, '')
-        if 'PLACEHOLDER' in value:
-            bad.append(key)
+    """Raise if any required QB account name is still PLACEHOLDER."""
+    required = {
+        'QB_ACCOUNT_EXCHANGE':      config.QB_ACCOUNT_EXCHANGE,
+        'QB_ACCOUNT_DKN_SALES':     config.QB_ACCOUNT_DKN_SALES,
+        'QB_ACCOUNT_SALES_TAX':     config.QB_ACCOUNT_SALES_TAX,
+        'QB_ACCOUNT_GIFT_CARDS':    config.QB_ACCOUNT_GIFT_CARDS,
+        'QB_ACCOUNT_EMPLOYEE_TIPS': config.QB_ACCOUNT_EMPLOYEE_TIPS,
+    }
+    bad = [k for k, v in required.items() if 'PLACEHOLDER' in str(v)]
     if bad:
         raise ValueError(
-            f"The following config.py values must be set before building qbXML: "
-            f"{', '.join(bad)}. "
-            "Open config.py and replace each PLACEHOLDER with the exact account "
-            "name from QuickBooks Desktop → Lists → Chart of Accounts."
+            f"Fill these config.py values before syncing: {', '.join(bad)}"
         )
