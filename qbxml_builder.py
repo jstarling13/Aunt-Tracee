@@ -41,7 +41,9 @@ def build_journal_entry_xml(sales_data: dict) -> str:
 
     business_date = sales_data['business_date']          # 'YYYY-MM-DD'
     location_id   = config.CRUNCHTIME_LOCATION_ID
-    ref_number    = f"CT-{location_id}-{business_date}"  # e.g. CT-1042-2024-01-15
+    # RefNumber: QB Desktop limit is 11 chars. Use compact date format.
+    compact_date  = business_date.replace('-', '')       # '20240115'
+    ref_number    = f"CT{compact_date}"                  # e.g. 'CT20240115' (10 chars)
 
     gross_sales = _to_decimal(sales_data.get('gross_sales', 0))
     discounts   = _to_decimal(sales_data.get('discounts', 0))
@@ -51,15 +53,17 @@ def build_journal_entry_xml(sales_data: dict) -> str:
     # Total discounts/comps reduces net revenue but we post them as separate debit lines
     total_discounts = discounts + promos
 
-    # Undeposited Funds = what actually came in the door
-    # net_sales = gross - discounts - tax (tax is collected on top but owed to govt)
-    undeposited = gross_sales - total_discounts  # simplified; adjust per client's accounting method
+    # Undeposited Funds = what customer actually paid (gross - discounts + tax collected)
+    # DR Undeposited + DR Discounts = CR Gross Sales + CR Sales Tax  (must balance)
+    undeposited = gross_sales - total_discounts + sales_tax
 
     logger.info(
         "Building qbXML | date=%s ref=%s gross=%.2f disc=%.2f tax=%.2f undep=%.2f",
         business_date, ref_number, gross_sales, total_discounts, sales_tax, undeposited
     )
 
+    # IMPORTANT: No XML comments — QB's qbXML parser rejects them.
+    # No em dashes or special Unicode — use plain ASCII in all text fields.
     xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <?qbxml version="13.0"?>
 <QBXML>
@@ -68,44 +72,35 @@ def build_journal_entry_xml(sales_data: dict) -> str:
       <JournalEntryAdd>
         <TxnDate>{business_date}</TxnDate>
         <RefNumber>{ref_number}</RefNumber>
-        <Memo>Crunchtime daily sales import — location {location_id}</Memo>
-
-        <!-- DEBIT: Cash and card receipts held until deposited -->
+        <Memo>Crunchtime sales import {business_date} loc {location_id}</Memo>
         <JournalDebitLine>
           <AccountRef>
             <FullName>{config.QB_ACCOUNT_UNDEPOSITED_FUNDS}</FullName>
           </AccountRef>
           <Amount>{_fmt(undeposited)}</Amount>
-          <Memo>Undeposited funds — {business_date}</Memo>
+          <Memo>Undeposited funds {business_date}</Memo>
         </JournalDebitLine>
-
-        <!-- CREDIT: Gross sales before discounts (income) -->
         <JournalCreditLine>
           <AccountRef>
             <FullName>{config.QB_ACCOUNT_GROSS_SALES}</FullName>
           </AccountRef>
           <Amount>{_fmt(gross_sales)}</Amount>
-          <Memo>Gross sales — {business_date}</Memo>
+          <Memo>Gross sales {business_date}</Memo>
         </JournalCreditLine>
-
-        <!-- DEBIT: Discounts and promos reduce net revenue -->
         <JournalDebitLine>
           <AccountRef>
             <FullName>{config.QB_ACCOUNT_DISCOUNTS}</FullName>
           </AccountRef>
           <Amount>{_fmt(total_discounts)}</Amount>
-          <Memo>Discounts/promos — {business_date}</Memo>
+          <Memo>Discounts and promos {business_date}</Memo>
         </JournalDebitLine>
-
-        <!-- CREDIT: Sales tax collected, owed to tax authority -->
         <JournalCreditLine>
           <AccountRef>
             <FullName>{config.QB_ACCOUNT_SALES_TAX}</FullName>
           </AccountRef>
           <Amount>{_fmt(sales_tax)}</Amount>
-          <Memo>Sales tax payable — {business_date}</Memo>
+          <Memo>Sales tax payable {business_date}</Memo>
         </JournalCreditLine>
-
       </JournalEntryAdd>
     </JournalEntryAddRq>
   </QBXMLMsgsRq>

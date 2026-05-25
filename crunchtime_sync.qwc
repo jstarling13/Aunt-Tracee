@@ -1,52 +1,14 @@
 <?xml version="1.0"?>
-<!--
-  crunchtime_sync.qwc — QuickBooks Web Connector application file
-  ================================================================
-  Load this file into QuickBooks Web Connector after completing ALL
-  the on-site setup steps in README.md.
-
-  FIELDS TO UPDATE BEFORE LOADING THIS FILE:
-  -------------------------------------------
-  1. <AppURL>      — replace with your ngrok https URL + /soap  (e.g. https://abc123.ngrok-free.app/soap)
-  2. <AppSupport>  — replace with your ngrok https URL
-  3. <UserName>    — must match QBWC_USERNAME in config.py       (default: integration_user)
-  4. <OwnerID>     — leave as-is OR generate a fresh GUID at https://www.guidgenerator.com
-  5. <FileID>      — leave as-is OR generate a fresh GUID
-
-  HOW TO LOAD:
-    1. Open QuickBooks Desktop and log in as Admin
-    2. Open QuickBooks Web Connector (Programs → QuickBooks → Web Connector)
-    3. Click "Add an Application" and select this .qwc file
-    4. QuickBooks will prompt you to authorize the app — click Yes/Allow
-    5. Enter the password from QBWC_PASSWORD in config.py when prompted
-    6. Check the checkbox next to the app and click "Update Selected"
--->
 <QBWCXML>
   <AppName>Crunchtime QBD Sync</AppName>
-
-  <!-- ON-SITE: Replace with your ngrok URL. Run: ngrok http 8000
-       The SOAP endpoint is served at /soap by the Spyne WSGI app. -->
-  <AppURL>PLACEHOLDER/soap</AppURL>
-
-  <!-- ON-SITE: Replace with same ngrok URL (no /soap path) -->
-  <AppSupport>PLACEHOLDER</AppSupport>
-
+  <AppID>Crunchtime_QBD_Sync</AppID>
+  <AppURL>http://localhost:8000/soap</AppURL>
+  <AppSupport>http://localhost:8000</AppSupport>
   <AppDescription>Imports daily Crunchtime sales data as QuickBooks journal entries</AppDescription>
-
-  <!-- Must match QBWC_USERNAME in config.py exactly -->
   <UserName>integration_user</UserName>
-
-  <!-- Leave these GUIDs as-is or generate new ones. They uniquely identify
-       this app to QuickBooks — do not change after first successful load. -->
   <OwnerID>{57F3B9D1-2A4C-4E8F-B1C7-9D3E6A0F5B82}</OwnerID>
   <FileID>{A2C4E6F8-1B3D-5F7A-9C0E-2D4F6A8B0C1E}</FileID>
-
-  <!-- Sync every 60 minutes. Adjust in minutes (minimum 1). -->
   <MinutesToPoll>60</MinutesToPoll>
-
-  <!-- qbXML version your server uses. Must match <?qbxml version="13.0"?> in qbxml_builder.py -->
   <QBType>QBFS</QBType>
-
-  <!-- Leave empty to use whatever company file is currently open in QB Desktop -->
   <IsReadOnly>false</IsReadOnly>
 </QBWCXML>

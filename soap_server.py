@@ -19,6 +19,7 @@
 import logging
 import os
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 
 from spyne import Application, rpc, ServiceBase, Unicode, Integer, Iterable
@@ -132,6 +133,16 @@ class QBWebConnectorService(ServiceBase):
             return ''
 
     # ------------------------------------------------------------------
+    # getLastError(ticket) → str
+    # Called by QBWC when sendRequestXML returns '' (nothing to do).
+    # Return a human-readable message explaining why we returned empty.
+    # ------------------------------------------------------------------
+    @rpc(Unicode, _returns=Unicode)
+    def getLastError(ctx, ticket):
+        logger.info("QBWC: getLastError")
+        return 'No new data to sync — already up to date.'
+
+    # ------------------------------------------------------------------
     # receiveResponseXML(ticket, response, hresult, message) → int
     # Return 100 = done, 0-99 = percent done (more requests pending),
     # negative = error.
@@ -143,14 +154,26 @@ class QBWebConnectorService(ServiceBase):
         row_id      = _state.get('row_id')
         target_date = _state.get('target_date')
 
-        # hresult is a hex string like '0x00000000'; non-zero means QB error
-        if hresult and hresult != '0x00000000':
-            error_msg = f"QB error hresult={hresult}: {message}"
+        # Check COM-level error first (hresult is hex like '0x80040400')
+        if hresult and hresult not in ('', '0x00000000'):
+            error_msg = f"QB COM error hresult={hresult}: {message}"
             logger.error("QBWC: %s", error_msg)
             if row_id:
                 sync_tracker.update_attempt(row_id, 'failed',
                                             qb_response=response,
                                             error_message=error_msg)
+            _state['row_id'] = _state['target_date'] = None
+            return -1
+
+        # Parse the qbXML response body for application-level errors
+        # QB returns statusCode="0" for success, anything else is an error
+        qb_error = _parse_qbxml_error(response)
+        if qb_error:
+            logger.error("QBWC: qbXML error for %s: %s", target_date, qb_error)
+            if row_id:
+                sync_tracker.update_attempt(row_id, 'failed',
+                                            qb_response=response,
+                                            error_message=qb_error)
             _state['row_id'] = _state['target_date'] = None
             return -1
 
@@ -168,6 +191,28 @@ class QBWebConnectorService(ServiceBase):
     def closeConnection(ctx, ticket):
         logger.info("QBWC: closeConnection")
         return 'Crunchtime sync complete'
+
+
+def _parse_qbxml_error(response: str) -> str | None:
+    """
+    Parse QB's qbXML response XML and return an error string if statusCode != 0,
+    or None on success.  QB embeds errors inside the response body even when the
+    COM-level HRESULT is empty/zero.
+    """
+    if not response:
+        return None
+    try:
+        root = ET.fromstring(response)
+        # Walk every element looking for statusCode attributes
+        for elem in root.iter():
+            code = elem.get('statusCode')
+            if code is not None and code != '0':
+                severity = elem.get('statusSeverity', 'Error')
+                msg      = elem.get('statusMessage', '(no message)')
+                return f"QB {severity} statusCode={code}: {msg}"
+    except ET.ParseError as exc:
+        return f"Could not parse QB response XML: {exc}"
+    return None
 
 
 def create_app() -> WsgiApplication:

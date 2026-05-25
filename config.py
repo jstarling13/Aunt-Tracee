@@ -31,20 +31,20 @@ USE_MOCK_DATA = True
 # Enter the same values when loading crunchtime_sync.qwc into QBWC.
 # -----------------------------------------------------------------------------
 QBWC_USERNAME = 'integration_user'
-QBWC_PASSWORD = 'PLACEHOLDER'             # make up a strong password
+QBWC_PASSWORD = 'SRG$ync2024!'            # QBWC password — enter this in QBWC password field
 
 # Public URL of your SOAP server (via ngrok). Run: ngrok http 8000
 # Example: 'https://a1b2-12-34-56-78.ngrok-free.app'
-APP_URL = 'PLACEHOLDER'
+APP_URL = 'https://antidote-upswing-reseller.ngrok-free.dev'
 
 # -----------------------------------------------------------------------------
 # QUICKBOOKS DESKTOP — CHART OF ACCOUNTS
 # Must match EXACTLY what appears in QB Desktop: Lists → Chart of Accounts
 # -----------------------------------------------------------------------------
-QB_ACCOUNT_GROSS_SALES        = 'PLACEHOLDER - must match QBD chart of accounts exactly'
-QB_ACCOUNT_DISCOUNTS          = 'PLACEHOLDER - must match QBD chart of accounts exactly'
-QB_ACCOUNT_SALES_TAX          = 'PLACEHOLDER - must match QBD chart of accounts exactly'
-QB_ACCOUNT_UNDEPOSITED_FUNDS  = 'PLACEHOLDER - must match QBD chart of accounts exactly'
+QB_ACCOUNT_GROSS_SALES        = 'Food Sales'
+QB_ACCOUNT_DISCOUNTS          = 'Discounts Given'
+QB_ACCOUNT_SALES_TAX          = 'Sales Tax Payable'
+QB_ACCOUNT_UNDEPOSITED_FUNDS  = 'Undeposited Funds'
 
 # -----------------------------------------------------------------------------
 # EMAIL ALERTS
